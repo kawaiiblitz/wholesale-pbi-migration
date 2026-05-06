@@ -3,7 +3,7 @@
 Pipeline para migrar dashboards de Power BI (.pbix) a dashboards Databricks Lakeview (AI/BI), con metric views generadas a partir del modelo tabular del PBIX. Plantilla específica para industria **wholesale / retail club** (membresías, renewal rate, segmentación de socios).
 
 **Origen:** fork sanitizado de [`yvillavicencioDBX/SAT`](https://github.com/yvillavicencioDBX/SAT) (Yolanda Villavicencio).
-**Estado:** funcional end-to-end con un PBIX real (Costco-Banamex, 293 visuales, 6 páginas). Incluye **fixes integrados** detectados en migración real, todos sin LLM en el loop (post-procesamiento determinístico).
+
 
 ---
 
