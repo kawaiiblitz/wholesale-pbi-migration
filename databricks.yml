@@ -1,0 +1,9 @@
+bundle:
+  name: wholesale-pbi-migration
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.databricks/
+.vscode/
+.DS_Store
+*.pbix

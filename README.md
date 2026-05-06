@@ -1,0 +1,231 @@
+# Wholesale PBI Migration Pipeline
+
+Pipeline para migrar dashboards de Power BI (.pbix) a dashboards Databricks Lakeview (AI/BI), con metric views generadas a partir del modelo tabular del PBIX. Plantilla específica para industria **wholesale / retail club** (membresías, renewal rate, segmentación de socios).
+
+**Origen:** fork sanitizado de [`yvillavicencioDBX/SAT`](https://github.com/yvillavicencioDBX/SAT) (Yolanda Villavicencio).
+**Estado:** funcional end-to-end con un PBIX real (Costco-Banamex, 293 visuales, 6 páginas). Incluye **fixes integrados** detectados en migración real, todos sin LLM en el loop (post-procesamiento determinístico).
+
+---
+
+## Para qué sirve
+
+Tomas un archivo `.pbix` exportado desde Power BI Desktop y obtienes:
+
+1. **Un modelo semántico en Unity Catalog** (Metric Views) con measures DAX traducidas a SQL.
+2. **Un dashboard Lakeview** (`.lvdash.json`) con páginas, widgets, slicers y textboxes del PBI original.
+3. **Datos sintéticos opcionales** para QA (no se usan con datos reales del cliente).
+
+---
+
+## Prerequisitos
+
+- Workspace Databricks con Serverless SQL Warehouse y Foundation Model API (Claude Sonnet 4 o equivalente).
+- Catálogo Unity Catalog donde escribir tablas y metric views.
+- Volumen UC para subir el archivo `.pbix`.
+- Tablas reales del cliente ya cargadas en UC (en producción) o el paso 00 (sintético) si es demo.
+
+---
+
+## Estructura del pipeline (orden de ejecución)
+
+| # | Notebook | Qué hace |
+|---|---|---|
+| **00** | `00. generate_sample_tables` | Solo demo. Genera tablas sintéticas a partir del modelo del PBIX |
+| **0** | `0. extract_pbix_model` | Extrae metadata: measures DAX, relaciones, columnas, filtros de contexto |
+| **1** | `1. create_base_metric_views` | Crea Metric Views base (source + joins + dimensiones) sin measures |
+| **2** | `2. create_measures` (LLM) | Traduce DAX → SQL. **Incluye auto-fix de bugs comunes (modules/measure_validators.py).** |
+| **2.1** | `2.1 create_dashboard_views` | Vistas SQL planas para el dashboard |
+| **3** | `3. create_dashboard_semantic` | Skeleton del dashboard. **Dataset query construido dinámicamente (modules/dynamic_dataset_query.py).** |
+| **4** | `4. extract_visuals` | Visuales, posiciones, campos, filtros per-visual, contenido textual de textboxes |
+| **4b** | `4b. extract_visual_props` | Sort, formato condicional, propiedades de columna |
+| **4b** | `4b. create_name_translator` | Mapea nombres PBI (CamelCase) → snake_case |
+| **5** | `5. generate_dashboard` (LLM) | Genera widgets. **Post-procesamiento determinístico al final (modules/lakeview_post_process.py).** |
+| **5b** | `5b. refine_dashboard` | Limpia widgets (props inválidas, queries malformadas) |
+| **6** | `6. add_dashboard_filters` | Convierte slicers PBI en filter widgets |
+| **7** | `7. apply_styles` | Aplica estilos (colores, formato) |
+| **8** | `8. humanize_titles (param)` (LLM) | Humaniza titulares técnicos |
+| **9** | `9. migration_report` | (Opcional) reporte de migración |
+| **10** | `10. export_metric_views` | (Opcional) exporta YAML de cada metric view |
+
+---
+
+## Cómo correr
+
+### Vía orquestador (todo de corrido)
+
+Abre `0. Orquestador Migracion PBI.py` en Databricks y configura los widgets:
+
+| Widget | Valor |
+|---|---|
+| `pbix_path` | `/Volumes/<catalog>/<schema>/pbix/<archivo>.pbix` |
+| `catalog` | catálogo destino del cliente |
+| `schema` | schema destino |
+| `dashboard_path` | `/Users/<email>/pbi-migration/<nombre>.lvdash.json` |
+| `llm_endpoint` | `databricks-claude-sonnet-4` |
+| `module_path` | `/Workspace/Users/<email>/pbi-migration/modules` |
+| `base_path` | `/Users/<email>/pbi-migration` |
+
+**En producción NO corras el paso 00.** Las tablas las trae el cliente.
+
+---
+
+## Imágenes del dashboard (logos, tarjetas, branding)
+
+El PBIX original suele tener imágenes embebidas (logos del cliente, fotos de tarjetas de membresía, etc.) que **el pipeline NO migra automáticamente** — Lakeview no tiene un widget directo equivalente al "image visual" de PBI.
+
+### Workflow para imágenes
+
+1. **Sube las imágenes a un Volume UC** (idealmente un volume dedicado por dashboard):
+   ```bash
+   databricks fs cp ./logo.png dbfs:/Volumes/<catalog>/<schema>/<volume>/imagenes/logo.png
+   databricks fs cp ./tarjeta_regular.png dbfs:/Volumes/<catalog>/<schema>/<volume>/imagenes/tarjeta_regular.png
+   ```
+
+2. **Convierte a PNG si están en .webp** (Lakeview no rendea webp en markdown widgets):
+   ```bash
+   sips -s format png imagen.webp --out imagen.png   # macOS
+   # o con ImageMagick:
+   convert imagen.webp imagen.png
+   ```
+
+3. **Embed las imágenes en el dashboard como base64** dentro de markdown widgets. El pipeline genera widgets `multilineTextboxSpec` que aceptan markdown con `data:image/png;base64,...`. Path `/Workspace/...` y URLs de Volume **no funcionan** dentro de markdown — solo data URIs.
+
+4. **Patrón recomendado para una "card row"** (4 imágenes alineadas con counters debajo):
+   ```python
+   import base64
+   def img_to_data_uri(path, mime='image/png'):
+       with open(path, 'rb') as f:
+           return f'data:{mime};base64,' + base64.b64encode(f.read()).decode()
+
+   logo_data = img_to_data_uri('logo.png')
+   # Markdown widget con:
+   # lines = [f'![Logo]({logo_data})', '**Etiqueta**']
+   # IMPORTANTE: NO dejes líneas vacías entre líneas con contenido,
+   # Lakeview las strippea (modules/lakeview_post_process.py se encarga).
+   ```
+
+5. **Para que el cliente reemplace** sus imágenes, dile que las suba al volume y luego ejecute un script que regenere las base64 y haga PATCH al dashboard via Lakeview API.
+
+---
+
+## Validación anti-alucinación (paso 2)
+
+El paso 2 traduce DAX → SQL usando un LLM. Después de cada traducción se aplican validadores deterministas (`modules/measure_validators.py`):
+
+- `SUM(col)` o `AVG(col)` donde `col` es STRING → auto-corregido a `COUNT(*)`
+- División sin `NULLIF` → auto-envuelve denominador
+- `CASE WHEN ... THEN <string_flag> ELSE 0 END` → auto-corrige a `THEN 1`
+
+Además, si el SQL traducido contiene literales que NO aparecen en el DAX original, la measure se marca como `NEEDS_REVIEW` en `pbi_measure_validation`.
+
+```sql
+SELECT measure, original_dax_measure, suspicious_literals
+FROM <catalog>.<schema>.pbi_measure_validation
+WHERE status = 'NEEDS_REVIEW';
+```
+
+---
+
+## Post-procesamiento del dashboard (paso 5)
+
+Después de que el LLM genere widgets, `modules/lakeview_post_process.py` aplica fixes deterministas que el LLM consistentemente no hace bien:
+
+| Fix | Por qué |
+|---|---|
+| Convertir `SUM(CASE WHEN... ELSE NULL END)` en counters → columna pre-computada `pc_<hash>` en outer SELECT del dataset, counter usa `SUM(pc_xxx)` simple | Lakeview client-side no procesa CASE WHEN, deja counters en "No data" |
+| Asignar `spec.frame.title` a cada counter (derivado del nombre del widget) | `displayName` en encoding NO se ve; `frame.title` sí |
+| Mover counters de `MIN(period)` y `MAX(year)` a la esquina derecha del header | Son contexto temporal, no métricas |
+| Strippear líneas vacías de `multilineTextboxSpec.lines` | Lakeview las descarta al guardar |
+| Reducir width del título a 9 si hay widgets en x>=9 con y=0 | Evita overlap del header con time counters |
+| Refrescar comment `-- bust:` del dataset query | Fuerza re-ejecución (evita cache) |
+
+---
+
+## Smoke test (paso 5)
+
+Al final del paso 5, `modules/smoke_test.py` ejecuta el dataset query y verifica que los counters retornen valores válidos:
+
+```
+✓ Smoke test PASS — dataset y counters funcionando
+```
+
+Si algo falla, lista los counters problemáticos antes de que el usuario los descubra en el browser.
+
+---
+
+## Limitaciones conocidas
+
+| # | Limitación | Workaround |
+|---|---|---|
+| 1 | Imágenes del PBIX no se migran | Subir al volume y embedir en markdown como base64 (ver sección Imágenes) |
+| 2 | Layout exacto pixel→grid es aproximado | Post-procesamiento ajusta lo más común; resto se afina en editor Lakeview |
+| 3 | Pivot tables (matrix visuals) del PBI no tienen equivalente directo | Se generan como `table` widgets simples (sin totals jerárquicos) |
+| 4 | Custom visuals (WordCloud, mapas custom, etc.) | Ignorados |
+| 5 | Bookmarks, drillthrough, paginated reports | Ignorados |
+
+---
+
+## Estructura del repo
+
+```
+.
+├── README.md
+├── databricks.yml
+├── wholesale-howyoudrivesales.lvdash.json   ← skeleton de referencia (Costco)
+└── pbi-migration/
+    ├── 0. Orquestador Migracion PBI.py     ← entrada principal
+    ├── 0. extract_pbix_model.py
+    ├── 00. generate_sample_tables.py       ← solo QA
+    ├── 1. create_base_metric_views.py
+    ├── 2. create_measures.py
+    ├── 2.1 create_dashboard_views.py
+    ├── 3. create_dashboard_semantic.py
+    ├── 4. extract_visuals.py
+    ├── 4b. extract_visual_props.py
+    ├── 4b. create_name_translator.py
+    ├── 5. generate_dashboard.py
+    ├── 5b. refine_dashboard.py
+    ├── 6. add_dashboard_filters.py
+    ├── 7. apply_styles.py
+    ├── 8. humanize_titles (param).py
+    ├── 9. migration_report.py
+    ├── 10. export_metric_views.py
+    ├── config/                              ← guías que el LLM lee en pasos 2, 5
+    │   ├── REGLAS_DASHBOARD.md
+    │   ├── DAX_TO_SQL_GUIDE.md
+    │   ├── CLAUDE_DASHBOARD_GUIDE.md
+    │   ├── AIBI_DASHBOARD_SKILL.md
+    │   └── CONVERSION_GUIDE.md
+    └── modules/
+        ├── llm_converter.py
+        ├── parser.py
+        ├── pbix_parser.py
+        ├── dax_function_reference.py
+        ├── metrics_view_docs.py
+        ├── lakeview_post_process.py        ← Post-procesamiento determinístico (paso 5)
+        ├── measure_validators.py           ← Auto-fix de measures (paso 2)
+        ├── dynamic_dataset_query.py        ← Dataset query dinámico (paso 3)
+        └── smoke_test.py                   ← Validación post-generación (paso 5)
+```
+
+---
+
+## Flujo de entrega recomendado
+
+1. Correr el pipeline completo (`0` a `8`).
+2. Consultar `pbi_measure_validation` y revisar cada `NEEDS_REVIEW`.
+3. Para cada measure sospechosa: comparar `sql_expr_preview` contra `original_dax_measure`. Si el LLM agregó condiciones inventadas, editar el YAML de la metric view manualmente.
+4. Validar que measures críticas devuelven valores no-NULL:
+   ```sql
+   SELECT MEASURE(<measure_name>) FROM <catalog>.<schema>.mv_<tabla>;
+   ```
+5. Abrir el dashboard publicado y comparar contra el PBIX original página por página.
+6. (Opcional) Subir imágenes del cliente al volume y embedirlas como base64 (ver sección Imágenes).
+7. Ajustes finos de layout/colores en el editor Lakeview.
+
+---
+
+## Créditos
+
+- Pipeline original: Yolanda Villavicencio (Databricks Field Engineering)
+- Fixes wholesale + post-procesamiento determinístico: Raquel Peña (Databricks Field Engineering)
