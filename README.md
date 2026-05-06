@@ -71,40 +71,63 @@ Abre `0. Orquestador Migracion PBI.py` en Databricks y configura los widgets:
 
 ## Imágenes del dashboard (logos, tarjetas, branding)
 
-El PBIX original suele tener imágenes embebidas (logos del cliente, fotos de tarjetas de membresía, etc.) que **el pipeline NO migra automáticamente** — Lakeview no tiene un widget directo equivalente al "image visual" de PBI.
+El PBIX suele tener imágenes embebidas (logos, fotos de tarjetas de membresía, etc.) que el pipeline NO migra automáticamente. Lakeview no tiene widget de imagen directo, así que las imágenes se inyectan como **markdown widgets con data URIs base64**.
+
+### Importante (lo aprendido en la práctica)
+
+Lakeview **NO resuelve paths externos** dentro de markdown widgets. Probamos con:
+- Volume UC (`/Volumes/...`) → no rendea
+- Workspace path (`/Workspace/...`) → no rendea
+- URL pública → solo funciona si es accesible sin auth desde el browser del usuario
+
+Lo que SÍ funciona y es el approach recomendado: **embeber la imagen como `data:image/png;base64,...`** dentro del JSON del dashboard. Pesa más pero es self-contained y portable.
 
 ### Workflow para imágenes
 
-1. **Sube las imágenes a un Volume UC** (idealmente un volume dedicado por dashboard):
-   ```bash
-   databricks fs cp ./logo.png dbfs:/Volumes/<catalog>/<schema>/<volume>/imagenes/logo.png
-   databricks fs cp ./tarjeta_regular.png dbfs:/Volumes/<catalog>/<schema>/<volume>/imagenes/tarjeta_regular.png
-   ```
-
-2. **Convierte a PNG si están en .webp** (Lakeview no rendea webp en markdown widgets):
+1. **Convierte a PNG si están en .webp** (Lakeview no rendea webp en markdown):
    ```bash
    sips -s format png imagen.webp --out imagen.png   # macOS
    # o con ImageMagick:
    convert imagen.webp imagen.png
    ```
 
-3. **Embed las imágenes en el dashboard como base64** dentro de markdown widgets. El pipeline genera widgets `multilineTextboxSpec` que aceptan markdown con `data:image/png;base64,...`. Path `/Workspace/...` y URLs de Volume **no funcionan** dentro de markdown — solo data URIs.
-
-4. **Patrón recomendado para una "card row"** (4 imágenes alineadas con counters debajo):
+2. **Embed las imágenes en el dashboard como base64** dentro de markdown widgets:
    ```python
-   import base64
+   import base64, json
+
    def img_to_data_uri(path, mime='image/png'):
        with open(path, 'rb') as f:
            return f'data:{mime};base64,' + base64.b64encode(f.read()).decode()
 
    logo_data = img_to_data_uri('logo.png')
-   # Markdown widget con:
-   # lines = [f'![Logo]({logo_data})', '**Etiqueta**']
-   # IMPORTANTE: NO dejes líneas vacías entre líneas con contenido,
-   # Lakeview las strippea (modules/lakeview_post_process.py se encarga).
+   card_data = img_to_data_uri('tarjeta_regular.png')
+
+   # En el .lvdash.json, agregar widget tipo markdown:
+   widget = {
+       "widget": {
+           "name": "img_card_regular",
+           "multilineTextboxSpec": {
+               "lines": [
+                   f"![Tarjeta]({card_data})",
+                   "**Regular | 1st Year**"   # NO líneas vacías entre contenido
+               ]
+           }
+       },
+       "position": {"x": 0, "y": 5, "width": 3, "height": 4}
+   }
    ```
 
-5. **Para que el cliente reemplace** sus imágenes, dile que las suba al volume y luego ejecute un script que regenere las base64 y haga PATCH al dashboard via Lakeview API.
+3. **Aplicar via Lakeview API** (no via workspace import, que no fuerza recompilación):
+   ```python
+   # modules/lakeview_post_process.py tiene helpers patch_dashboard_via_lakeview_api
+   # y publish_dashboard que automatizan esto.
+   ```
+
+### Notas operativas
+
+- **Markdown widgets strippean líneas vacías**: si pones `[image, '', label]`, Lakeview guarda solo `[image]`. El módulo `lakeview_post_process.py` filtra blanks automáticamente en post-procesamiento.
+- **Tamaño**: las imágenes base64 inflan el .lvdash.json ~33%. Una página con 4 imágenes de 50KB cada una agrega ~270KB al JSON. Manejable hasta varios MB.
+- **Opcional**: si quieres mantener las imágenes "fuera" del JSON, puedes guardar un volume backup en `dbfs:/Volumes/<catalog>/<schema>/<volume>/imagenes/` y un script que las inyecte como base64 en el dashboard cada vez que se regenere. Útil si el cliente reemplaza branding seguido.
 
 ---
 
