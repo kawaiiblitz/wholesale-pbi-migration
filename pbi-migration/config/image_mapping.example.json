@@ -1,0 +1,22 @@
+{
+  "_comment": "Mapping de widget_name -> image_path. Editar y guardar como image_mapping.json en tu workspace. El widget_name debe existir en el dashboard (revisa con list_image_widgets()).",
+
+  "img_logo_costco": "logo_costco.png",
+
+  "img_card_rtcc": {
+    "path": "tarjeta_rtcc.png",
+    "caption": "Regular + TCC"
+  },
+  "img_card_reg": {
+    "path": "tarjeta_reg.png",
+    "caption": "Regular Gold & Business"
+  },
+  "img_card_exc": {
+    "path": "tarjeta_exc.png",
+    "caption": "Executive Gold & Business"
+  },
+  "img_card_etcc": {
+    "path": "tarjeta_etcc.png",
+    "caption": "Executive + TCC"
+  }
+}

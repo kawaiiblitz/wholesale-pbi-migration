@@ -43,6 +43,7 @@ Tomas un archivo `.pbix` exportado desde Power BI Desktop y obtienes:
 | **5b** | `5b. refine_dashboard` | Limpia widgets (props inválidas, queries malformadas) |
 | **6** | `6. add_dashboard_filters` | Convierte slicers PBI en filter widgets |
 | **7** | `7. apply_styles` | Aplica estilos (colores, formato) |
+| **7b** | `7b. embed_images` (opcional) | Embebe logos/branding del cliente como base64 (`modules/image_embedder.py`) |
 | **8** | `8. humanize_titles (param)` (LLM) | Humaniza titulares técnicos |
 | **9** | `9. migration_report` | (Opcional) reporte de migración |
 | **10** | `10. export_metric_views` | (Opcional) exporta YAML de cada metric view |
@@ -82,46 +83,60 @@ Lakeview **NO resuelve paths externos** dentro de markdown widgets. Probamos con
 
 Lo que SÍ funciona y es el approach recomendado: **embeber la imagen como `data:image/png;base64,...`** dentro del JSON del dashboard. Pesa más pero es self-contained y portable.
 
-### Workflow para imágenes
+### Workflow automatizado (recomendado)
 
-1. **Convierte a PNG si están en .webp** (Lakeview no rendea webp en markdown):
+Usa el módulo **`modules/image_embedder.py`** y el notebook **`7b. embed_images.py`**.
+
+1. **Sube las imágenes a un Volume UC** (o Workspace path):
+   ```
+   /Volumes/<catalog>/<schema>/<volume>/imagenes/
+     ├── logo_costco.png
+     ├── tarjeta_rtcc.png
+     ├── tarjeta_reg.png
+     └── ...
+   ```
+
+2. **Convierte a PNG si están en .webp** (Lakeview no rendea webp en markdown):
    ```bash
    sips -s format png imagen.webp --out imagen.png   # macOS
    # o con ImageMagick:
    convert imagen.webp imagen.png
    ```
 
-2. **Embed las imágenes en el dashboard como base64** dentro de markdown widgets:
-   ```python
-   import base64, json
-
-   def img_to_data_uri(path, mime='image/png'):
-       with open(path, 'rb') as f:
-           return f'data:{mime};base64,' + base64.b64encode(f.read()).decode()
-
-   logo_data = img_to_data_uri('logo.png')
-   card_data = img_to_data_uri('tarjeta_regular.png')
-
-   # En el .lvdash.json, agregar widget tipo markdown:
-   widget = {
-       "widget": {
-           "name": "img_card_regular",
-           "multilineTextboxSpec": {
-               "lines": [
-                   f"![Tarjeta]({card_data})",
-                   "**Regular | 1st Year**"   # NO líneas vacías entre contenido
-               ]
-           }
-       },
-       "position": {"x": 0, "y": 5, "width": 3, "height": 4}
+3. **Crea un archivo `image_mapping.json`** en tu workspace (template en `config/image_mapping.example.json`):
+   ```json
+   {
+     "img_logo_costco": "logo_costco.png",
+     "img_card_rtcc": {"path": "tarjeta_rtcc.png", "caption": "RTCC"},
+     "img_card_reg": {"path": "tarjeta_reg.png", "caption": "REG"}
    }
    ```
 
-3. **Aplicar via Lakeview API** (no via workspace import, que no fuerza recompilación):
-   ```python
-   # modules/lakeview_post_process.py tiene helpers patch_dashboard_via_lakeview_api
-   # y publish_dashboard que automatizan esto.
-   ```
+4. **Corre el notebook `7b. embed_images.py`** con estos widgets:
+   - `dashboard_path`: `/Workspace/.../tu-dashboard.lvdash.json`
+   - `image_dir`: `/Volumes/<catalog>/<schema>/<volume>/imagenes`
+   - `mapping_path`: `/Workspace/.../image_mapping.json`
+
+   El notebook llama a `embed_images_in_dashboard()` que convierte cada imagen
+   a data URI base64 y la inyecta como markdown widget reemplazando el placeholder.
+
+### Workflow manual (si prefieres script propio)
+
+```python
+from image_embedder import embed_images_in_dashboard, load_mapping
+
+mapping = load_mapping('/Workspace/.../image_mapping.json')
+n = embed_images_in_dashboard(
+    dashboard,
+    mapping,
+    image_dir='/Volumes/<catalog>/<schema>/<volume>/imagenes'
+)
+print(f'{n} imágenes embebidas')
+```
+
+Y luego subes el dashboard via Lakeview API (no via workspace import, que no
+fuerza recompilación). El módulo `lakeview_post_process.py` tiene los helpers
+`patch_dashboard_via_lakeview_api` y `publish_dashboard`.
 
 ### Notas operativas
 
@@ -210,6 +225,7 @@ Si algo falla, lista los counters problemáticos antes de que el usuario los des
     ├── 5b. refine_dashboard.py
     ├── 6. add_dashboard_filters.py
     ├── 7. apply_styles.py
+    ├── 7b. embed_images.py                  ← embebir logos/branding del cliente
     ├── 8. humanize_titles (param).py
     ├── 9. migration_report.py
     ├── 10. export_metric_views.py
@@ -218,7 +234,8 @@ Si algo falla, lista los counters problemáticos antes de que el usuario los des
     │   ├── DAX_TO_SQL_GUIDE.md
     │   ├── CLAUDE_DASHBOARD_GUIDE.md
     │   ├── AIBI_DASHBOARD_SKILL.md
-    │   └── CONVERSION_GUIDE.md
+    │   ├── CONVERSION_GUIDE.md
+    │   └── image_mapping.example.json       ← template para paso 7b
     └── modules/
         ├── llm_converter.py
         ├── parser.py
@@ -228,6 +245,7 @@ Si algo falla, lista los counters problemáticos antes de que el usuario los des
         ├── lakeview_post_process.py        ← Post-procesamiento determinístico (paso 5)
         ├── measure_validators.py           ← Auto-fix de measures (paso 2)
         ├── dynamic_dataset_query.py        ← Dataset query dinámico (paso 3)
+        ├── image_embedder.py               ← Embebir imágenes base64 (paso 7b)
         └── smoke_test.py                   ← Validación post-generación (paso 5)
 ```
 
