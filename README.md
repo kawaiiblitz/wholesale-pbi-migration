@@ -72,53 +72,16 @@ Abre `0. Orquestador Migracion PBI.py` en Databricks y configura los widgets:
 
 ## Imágenes del dashboard (logos, tarjetas, branding)
 
-El PBIX suele tener imágenes embebidas (logos, fotos de tarjetas de membresía, etc.) que el pipeline NO migra automáticamente. Lakeview no tiene widget de imagen directo, así que las imágenes se inyectan como **markdown widgets con data URIs base64**.
+El PBIX suele traer imágenes (logos, tarjetas) que el pipeline no migra automáticamente porque Lakeview no tiene widget de imagen nativo. La solución es embeberlas como base64 dentro de un markdown widget.
 
-### Importante (lo aprendido en la práctica)
+**Workflow rápido (4 pasos):**
 
-Lakeview **NO resuelve paths externos** dentro de markdown widgets. Probamos con:
-- Volume UC (`/Volumes/...`) → no rendea
-- Workspace path (`/Workspace/...`) → no rendea
-- URL pública → solo funciona si es accesible sin auth desde el browser del usuario
+1. Sube las imágenes (PNG/JPG) a un Volume UC: `/Volumes/<catalog>/<schema>/<volume>/imagenes/`
+2. Crea un `image_mapping.json` con `{widget_name: filename}` (template en `config/image_mapping.example.json`)
+3. Corre el notebook `7b. embed_images.py` apuntando al dashboard, carpeta de imágenes y mapping
+4. El notebook convierte cada imagen a base64 y la inyecta en el widget correspondiente
 
-Lo que SÍ funciona y es el approach recomendado: **embeber la imagen como `data:image/png;base64,...`** dentro del JSON del dashboard. Pesa más pero es self-contained y portable.
-
-### Workflow automatizado (recomendado)
-
-Usa el módulo **`modules/image_embedder.py`** y el notebook **`7b. embed_images.py`**.
-
-1. **Sube las imágenes a un Volume UC** (o Workspace path):
-   ```
-   /Volumes/<catalog>/<schema>/<volume>/imagenes/
-     ├── logo_costco.png
-     ├── tarjeta_rtcc.png
-     ├── tarjeta_reg.png
-     └── ...
-   ```
-
-2. **Convierte a PNG si están en .webp** (Lakeview no rendea webp en markdown):
-   ```bash
-   sips -s format png imagen.webp --out imagen.png   # macOS
-   # o con ImageMagick:
-   convert imagen.webp imagen.png
-   ```
-
-3. **Crea un archivo `image_mapping.json`** en tu workspace (template en `config/image_mapping.example.json`):
-   ```json
-   {
-     "img_logo_costco": "logo_costco.png",
-     "img_card_rtcc": {"path": "tarjeta_rtcc.png", "caption": "RTCC"},
-     "img_card_reg": {"path": "tarjeta_reg.png", "caption": "REG"}
-   }
-   ```
-
-4. **Corre el notebook `7b. embed_images.py`** con estos widgets:
-   - `dashboard_path`: `/Workspace/.../tu-dashboard.lvdash.json`
-   - `image_dir`: `/Volumes/<catalog>/<schema>/<volume>/imagenes`
-   - `mapping_path`: `/Workspace/.../image_mapping.json`
-
-   El notebook llama a `embed_images_in_dashboard()` que convierte cada imagen
-   a data URI base64 y la inyecta como markdown widget reemplazando el placeholder.
+Listo. Si las imágenes están en `.webp`, conviértelas a PNG primero (Lakeview no rendea webp).
 
 ### Workflow manual (si prefieres script propio)
 
